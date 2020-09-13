@@ -39,6 +39,6 @@ setup(
         'Programming Language :: Python :: 3.8'
     ],
     python_requires='~=3.4',
-    install_requires=['SQLAlchemy', 'wrapt'],
+    install_requires=['SQLAlchemy'],
     extras_require=optional_dependencies,
 )

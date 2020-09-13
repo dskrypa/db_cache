@@ -5,15 +5,15 @@ ScopedSession for using SqlAlchemy in a multithreaded application
 """
 import os
 import logging
-import platform
 from getpass import getuser
+from platform import system
 
 from sqlalchemy.orm import sessionmaker, scoped_session
 
 __all__ = ['ScopedSession', 'validate_or_make_dir', 'get_user_cache_dir']
 log = logging.getLogger(__name__)
 
-ON_WINDOWS = platform.system().lower() == 'windows'
+ON_WINDOWS = system().lower() == 'windows'
 
 
 class ScopedSession:
@@ -33,7 +33,7 @@ class ScopedSession:
         self._scoped_session.remove()
 
 
-def validate_or_make_dir(dir_path, permissions=None, suppress_perm_change_exc=True):
+def validate_or_make_dir(dir_path, permissions=None, suppress_perm_change_exc=True) -> str:
     """
     Validate that the given path exists and is a directory.  If it does not exist, then create it and any intermediate
     directories.
@@ -60,7 +60,7 @@ def validate_or_make_dir(dir_path, permissions=None, suppress_perm_change_exc=Tr
     return dir_path
 
 
-def get_user_cache_dir(subdir=None, permissions=None):
+def get_user_cache_dir(subdir=None, permissions=None) -> str:
     cache_dir = os.path.join('C:/var/tmp' if ON_WINDOWS else '/var/tmp', getuser(), 'db_cache')
     if subdir:
         cache_dir = os.path.join(cache_dir, subdir)

@@ -9,12 +9,13 @@ import os
 import time
 from datetime import datetime
 from pathlib import Path
+from threading import RLock
+from typing import Mapping
 
 from sqlalchemy import create_engine, MetaData, Table, Column, PickleType, Integer
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm.exc import NoResultFound
 from sqlalchemy.exc import NoSuchTableError, OperationalError
-from wrapt import synchronized
 
 from .utils import ScopedSession, validate_or_make_dir, get_user_cache_dir
 
@@ -66,8 +67,8 @@ class DBCache:
     :param entry_cls: The class to use for DB entries
     """
     def __init__(
-            self, prefix, cache_dir=None, cache_subdir=None, time_fmt='%Y-%m', preserve_old=False, db_path=None,
-            entry_cls=DBCacheEntry
+        self, prefix, cache_dir=None, cache_subdir=None, time_fmt='%Y-%m', preserve_old=False, db_path=None,
+        entry_cls=DBCacheEntry
     ):
         if not db_path:
             if cache_dir:
@@ -104,6 +105,7 @@ class DBCache:
             Base.metadata.create_all(self.engine)
             self.table = Table(self._entry_cls.__tablename__, self.meta, autoload=True)
         self.db_session = ScopedSession(self.engine)
+        self._lock = RLock()
 
     def keys(self):
         with self.db_session as session:
@@ -134,7 +136,7 @@ class DBCache:
             return default
 
     def pop(self, key, default=_NotSet):
-        with synchronized(self):
+        with self._lock:
             try:
                 value = self[key]
             except KeyError:
@@ -145,18 +147,27 @@ class DBCache:
                 del self[key]
                 return value
 
+    def update(self, data: Mapping):
+        with self._lock:
+            with self.db_session as session:
+                for key, value in data.items():
+                    # noinspection PyArgumentList
+                    entry = self._entry_cls(key=key, value=value)
+                    session.merge(entry)
+                session.commit()
+
     def __len__(self):
-        with synchronized(self):
+        with self._lock:
             with self.db_session as session:
                 return session.query(self._entry_cls).count()
 
     def __contains__(self, item):
-        with synchronized(self):
+        with self._lock:
             with self.db_session as session:
                 return session.query(self._entry_cls).filter_by(key=item).scalar()
 
     def __getitem__(self, item):
-        with synchronized(self):
+        with self._lock:
             with self.db_session as session:
                 try:
                     # log.debug('Trying to return {!r}'.format(item))
@@ -166,7 +177,7 @@ class DBCache:
                     raise KeyError(item) from e
 
     def __setitem__(self, key, value):
-        with synchronized(self):
+        with self._lock:
             with self.db_session as session:
                 # noinspection PyArgumentList
                 entry = self._entry_cls(key=key, value=value)
@@ -174,7 +185,7 @@ class DBCache:
                 session.commit()
 
     def __delitem__(self, key):
-        with synchronized(self):
+        with self._lock:
             with self.db_session as session:
                 try:
                     session.query(self._entry_cls).filter_by(key=key).delete()
@@ -198,7 +209,7 @@ class TTLDBCache(DBCache):
         :param int expiration: A unix epoch timestamp - items created before this time will be removed from the cache.
           Defaults to the given TTL seconds earlier than the current time.
         """
-        with synchronized(self):
+        with self._lock:
             if expiration is None:
                 expiration = int(time.time()) - self._ttl
             with self.db_session as session:
@@ -211,38 +222,49 @@ class TTLDBCache(DBCache):
                     session.commit()
 
     def keys(self):
-        with synchronized(self):
+        with self._lock:
             self.expire()
             with self.db_session as session:
                 for entry in session.query(self._entry_cls):
                     yield entry.key
 
     def values(self):
-        with synchronized(self):
+        with self._lock:
             self.expire()
             with self.db_session as session:
                 for entry in session.query(self._entry_cls):
                     yield entry.value
 
     def items(self):
-        with synchronized(self):
+        with self._lock:
             self.expire()
             with self.db_session as session:
                 for entry in session.query(self._entry_cls):
                     yield entry.key, entry.value
 
+    def update(self, data: Mapping):
+        with self._lock:
+            self.expire()
+            with self.db_session as session:
+                created = int(time.time())
+                for key, value in data.items():
+                    # noinspection PyArgumentList
+                    entry = self._entry_cls(key=key, value=value, created=created)
+                    session.merge(entry)
+                session.commit()
+
     def __len__(self):
-        with synchronized(self):
+        with self._lock:
             self.expire()
             return super().__len__()
 
     def __contains__(self, item):
-        with synchronized(self):
+        with self._lock:
             self.expire()
             return super().__contains__(item)
 
     def __setitem__(self, key, value):
-        with synchronized(self):
+        with self._lock:
             self.expire()
             with self.db_session as session:
                 # noinspection PyArgumentList
@@ -251,6 +273,6 @@ class TTLDBCache(DBCache):
                 session.commit()
 
     def __getitem__(self, item):
-        with synchronized(self):
+        with self._lock:
             self.expire()
             return super().__getitem__(item)
