@@ -12,6 +12,13 @@ with project_root.joinpath('db_cache', '__version__.py').open('r', encoding='utf
     exec(f.read(), about)
 
 
+optional_dependencies = {
+    'dev': [                                            # Development env requirements
+        'pre-commit',
+        'ipython',
+    ],
+}
+
 setup(
     name=about['__title__'],
     version=about['__version__'],
@@ -20,7 +27,7 @@ setup(
     description=about['__description__'],
     long_description=long_description,
     url=about['__url__'],
-    project_urls={'Source': 'https://github.com/dskrypa/db_cache'},
+    project_urls={'Source': about['__url__']},
     packages=['db_cache'],
     classifiers=[
         'License :: OSI Approved :: Apache Software License',
@@ -32,5 +39,6 @@ setup(
         'Programming Language :: Python :: 3.8'
     ],
     python_requires='~=3.4',
-    install_requires=['SQLAlchemy', 'wrapt']
+    install_requires=['SQLAlchemy', 'wrapt'],
+    extras_require=optional_dependencies,
 )
