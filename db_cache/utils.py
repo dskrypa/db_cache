@@ -5,8 +5,6 @@ ScopedSession for using SqlAlchemy in a multithreaded application
 """
 import os
 import logging
-from getpass import getuser
-from platform import system
 
 from sqlalchemy.orm import sessionmaker, scoped_session
 
@@ -59,6 +57,8 @@ def validate_or_make_dir(dir_path, permissions=None, suppress_perm_change_exc=Tr
 
 
 def get_user_cache_dir(subdir=None, permissions=None) -> str:
+    from getpass import getuser
+    from platform import system
     cache_dir = os.path.join('C:/var/tmp' if system().lower() == 'windows' else '/var/tmp', getuser(), 'db_cache')
     if subdir:
         cache_dir = os.path.join(cache_dir, subdir)

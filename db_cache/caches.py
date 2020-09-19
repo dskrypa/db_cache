@@ -107,6 +107,10 @@ class DBCache:
         self.db_session = ScopedSession(self.engine)
         self._lock = RLock()
 
+    @classmethod
+    def _get_default_key_func(cls):
+        return _CacheKey.simple_noself
+
     def keys(self):
         with self.db_session as session:
             for entry in session.query(self._entry_cls):
@@ -276,3 +280,29 @@ class TTLDBCache(DBCache):
         with self._lock:
             self.expire()
             return super().__getitem__(item)
+
+
+class _CacheKey:
+    __slots__ = ('_hash', '_vals')
+
+    def __init__(self, tup):
+        self._vals = tup
+        self._hash = hash(tup)
+
+    def __hash__(self):
+        return self._hash
+
+    def __eq__(self, other):
+        try:
+            return self._vals == other._vals
+        except AttributeError:
+            return False
+
+    @classmethod
+    def _to_tuple(cls, *args, **kwargs):
+        return args if not kwargs else args + sum(sorted(kwargs.items()), (cls,))
+
+    @classmethod
+    def simple_noself(cls, *args, **kwargs):
+        """Return a cache key for the specified hashable arguments, omitting the first positional argument."""
+        return cls(cls._to_tuple(*args[1:], **kwargs))
