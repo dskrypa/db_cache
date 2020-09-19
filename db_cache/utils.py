@@ -13,8 +13,6 @@ from sqlalchemy.orm import sessionmaker, scoped_session
 __all__ = ['ScopedSession', 'validate_or_make_dir', 'get_user_cache_dir']
 log = logging.getLogger(__name__)
 
-ON_WINDOWS = system().lower() == 'windows'
-
 
 class ScopedSession:
     """
@@ -61,7 +59,7 @@ def validate_or_make_dir(dir_path, permissions=None, suppress_perm_change_exc=Tr
 
 
 def get_user_cache_dir(subdir=None, permissions=None) -> str:
-    cache_dir = os.path.join('C:/var/tmp' if ON_WINDOWS else '/var/tmp', getuser(), 'db_cache')
+    cache_dir = os.path.join('C:/var/tmp' if system().lower() == 'windows' else '/var/tmp', getuser(), 'db_cache')
     if subdir:
         cache_dir = os.path.join(cache_dir, subdir)
     validate_or_make_dir(cache_dir, permissions=permissions)
