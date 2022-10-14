@@ -1,13 +1,10 @@
 #!/usr/bin/env python
 
 import logging
-import sys
 import tempfile
 import time
 import unittest
-from pathlib import Path
 
-sys.path.append(Path(__file__).parents[1].as_posix())
 from db_cache import TTLDBCache
 
 log = logging.getLogger(__name__)

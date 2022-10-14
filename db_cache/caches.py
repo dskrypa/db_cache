@@ -4,20 +4,23 @@ Cache classes that store values in an SQLite3 DB, using SQLAlchemy.
 :author: Doug Skrypa
 """
 
+from __future__ import annotations
+
 import logging
-import os
 import time
 from datetime import datetime
 from pathlib import Path
 from threading import RLock
-from typing import Mapping
+from typing import TYPE_CHECKING, Mapping
 
 from sqlalchemy import create_engine, MetaData, Table, Column, PickleType, Integer
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm.exc import NoResultFound
-from sqlalchemy.exc import NoSuchTableError, OperationalError
+from sqlalchemy.exc import NoSuchTableError, OperationalError, NoResultFound
 
-from .utils import ScopedSession, validate_or_make_dir, get_user_cache_dir
+from .utils import ScopedSession, validate_or_make_dir, get_user_cache_dir, PathLike
+
+if TYPE_CHECKING:
+    from sqlalchemy.orm import scoped_session
 
 __all__ = ['DBCache', 'DBCacheEntry', 'TTLDBCacheEntry', 'TTLDBCache']
 log = logging.getLogger(__name__)
@@ -33,8 +36,8 @@ class DBCacheEntry(Base):
     key = Column(PickleType, primary_key=True, index=True, unique=True)
     value = Column(PickleType)
 
-    def __repr__(self):
-        return '<{}({!r})>'.format(type(self).__name__, self.key)
+    def __repr__(self) -> str:
+        return f'<{self.__class__.__name__}({self.key!r})>'
 
 
 class TTLDBCacheEntry(Base):
@@ -45,8 +48,8 @@ class TTLDBCacheEntry(Base):
     value = Column(PickleType)
     created = Column(Integer, index=True)
 
-    def __repr__(self):
-        return '<{}({!r}, created={})>'.format(type(self).__name__, self.key, self.created)
+    def __repr__(self) -> str:
+        return f'<{self.__class__.__name__}({self.key!r}, created={self.created})>'
 
 
 class DBCache:
@@ -57,72 +60,88 @@ class DBCache:
 
     Based on the args provided and the current user, the final path will be: ``db_dir/file_prefix.user.timestamp.db``
 
-    :param str prefix: Prefix for DB cache file names
-    :param str|None cache_dir: Directory in which DB cache files should be stored; default: result of
+    :param prefix: Prefix for DB cache file names
+    :param cache_dir: Directory in which DB cache files should be stored; default: result of
       :func:`get_user_cache_dir<ds_tools.utils.filesystem.get_user_cache_dir>`
-    :param str cache_subdir: Sub directory within the chosen cache_dir in which the DB should be stored
-    :param str time_fmt: Datetime format to use for DB cache file names
-    :param bool preserve_old: True to preserve old cache files, False (default) to delete them
-    :param str db_path: An explicit path to use for the DB instead of a dynamically generated one
+    :param cache_subdir: Sub directory within the chosen cache_dir in which the DB should be stored
+    :param time_fmt: Datetime format to use for DB cache file names
+    :param preserve_old: True to preserve old cache files, False (default) to delete them
+    :param db_path: An explicit path to use for the DB instead of a dynamically generated one
     :param entry_cls: The class to use for DB entries
     """
     def __init__(
-        self, prefix, cache_dir=None, cache_subdir=None, time_fmt='%Y-%m', preserve_old=False, db_path=None,
-        entry_cls=DBCacheEntry
+        self,
+        prefix: str,
+        cache_dir: PathLike = None,
+        cache_subdir: str = None,
+        time_fmt: str = '%Y-%m',
+        preserve_old: bool = False,
+        db_path: PathLike = None,
+        entry_cls=DBCacheEntry,
     ):
         if not db_path:
             if cache_dir:
-                self.cache_dir = os.path.join(cache_dir, cache_subdir) if cache_subdir else cache_dir
-                validate_or_make_dir(self.cache_dir)
+                cache_dir = Path(cache_dir).expanduser()
+                self.cache_dir = validate_or_make_dir((cache_dir / cache_subdir) if cache_subdir else cache_dir)
             else:
                 self.cache_dir = get_user_cache_dir(cache_subdir)
-            db_file_prefix = '{}.'.format(prefix)
-            current_db = '{}{}.db'.format(db_file_prefix, datetime.now().strftime(time_fmt))
 
+            current_db = f'{prefix}.{datetime.now().strftime(time_fmt)}.db'
             if not preserve_old:
-                for fname in os.listdir(self.cache_dir):
-                    if fname.startswith(db_file_prefix) and fname.endswith('.db') and fname != current_db:
-                        file_path = os.path.join(self.cache_dir, fname)
-                        try:
-                            if os.path.isfile(file_path):
-                                log.debug('Deleting old cache file: {}'.format(file_path))
-                                os.remove(file_path)
-                        except OSError as e:
-                            log.debug('{} while deleting old cache file {}: {}'.format(type(e).__name__, file_path, e))
+                self._cleanup_old_dbs(f'{prefix}.', current_db)
 
-            db_path = os.path.join(self.cache_dir, current_db)
+            db_path = self.cache_dir.joinpath(current_db)
         else:
-            _path = Path(db_path).expanduser().resolve()
-            if not _path.exists():
-                os.makedirs(_path.parent.as_posix())
+            path = Path(db_path).expanduser().resolve()
+            path.parent.mkdir(parents=True, exist_ok=True)
 
         self._entry_cls = entry_cls
-        self.engine = create_engine('sqlite:///{}'.format(db_path), echo=False)
+        self.engine = create_engine(f'sqlite:///{db_path.as_posix()}', echo=False)
         self.meta = MetaData(self.engine)
         try:
             self.table = Table(self._entry_cls.__tablename__, self.meta, autoload=True)
-        except NoSuchTableError as e:
+        except NoSuchTableError:
             Base.metadata.create_all(self.engine)
             self.table = Table(self._entry_cls.__tablename__, self.meta, autoload=True)
         self.db_session = ScopedSession(self.engine)
         self._lock = RLock()
 
+    def _cleanup_old_dbs(self, db_file_prefix: str, current_db: str):
+        for path in self.cache_dir.iterdir():
+            if path.name.startswith(db_file_prefix) and path.suffix == '.db' and path.name != current_db:
+                try:
+                    if path.is_file():
+                        log.debug(f'Deleting old cache file: {path.as_posix()}')
+                        path.unlink()
+                except OSError as e:
+                    log.debug(f'{e.__class__.__name__} while deleting old cache file {path.as_posix()}: {e}')
+
     @classmethod
     def _get_default_key_func(cls):
         return _CacheKey.simple_noself
 
+    def __enter__(self) -> scoped_session:
+        self._lock.acquire()
+        return self.db_session.__enter__()
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        try:
+            self.db_session.__exit__(exc_type, exc_val, exc_tb)
+        finally:
+            self._lock.release()
+
     def keys(self):
-        with self.db_session as session:
+        with self as session:
             for entry in session.query(self._entry_cls):
                 yield entry.key
 
     def values(self):
-        with self.db_session as session:
+        with self as session:
             for entry in session.query(self._entry_cls):
                 yield entry.value
 
     def items(self):
-        with self.db_session as session:
+        with self as session:
             for entry in session.query(self._entry_cls):
                 yield entry.key, entry.value
 
@@ -152,65 +171,57 @@ class DBCache:
                 return value
 
     def update(self, data: Mapping):
-        with self._lock:
-            with self.db_session as session:
-                for key, value in data.items():
-                    # noinspection PyArgumentList
-                    entry = self._entry_cls(key=key, value=value)
-                    session.merge(entry)
-                session.commit()
-
-    def __len__(self):
-        with self._lock:
-            with self.db_session as session:
-                return session.query(self._entry_cls).count()
-
-    def __contains__(self, item):
-        with self._lock:
-            with self.db_session as session:
-                return session.query(self._entry_cls).filter_by(key=item).scalar()
-
-    def __getitem__(self, item):
-        with self._lock:
-            with self.db_session as session:
-                try:
-                    # log.debug('Trying to return {!r}'.format(item))
-                    return session.query(self._entry_cls).filter_by(key=item).one().value
-                except (NoResultFound, OperationalError) as e:
-                    # log.debug('Did not have cached: {!r}'.format(item))
-                    raise KeyError(item) from e
-
-    def __setitem__(self, key, value):
-        with self._lock:
-            with self.db_session as session:
-                # noinspection PyArgumentList
+        with self as session:
+            for key, value in data.items():
                 entry = self._entry_cls(key=key, value=value)
                 session.merge(entry)
-                session.commit()
+            session.commit()
+
+    def __len__(self):
+        with self as session:
+            return session.query(self._entry_cls).count()
+
+    def __contains__(self, item):
+        with self as session:
+            return session.query(self._entry_cls).filter_by(key=item).scalar()
+
+    def __getitem__(self, item):
+        with self as session:
+            try:
+                # log.debug('Trying to return {!r}'.format(item))
+                return session.query(self._entry_cls).filter_by(key=item).one().value
+            except (NoResultFound, OperationalError) as e:
+                # log.debug('Did not have cached: {!r}'.format(item))
+                raise KeyError(item) from e
+
+    def __setitem__(self, key, value):
+        with self as session:
+            entry = self._entry_cls(key=key, value=value)
+            session.merge(entry)
+            session.commit()
 
     def __delitem__(self, key):
-        with self._lock:
-            with self.db_session as session:
-                try:
-                    session.query(self._entry_cls).filter_by(key=key).delete()
-                except (NoResultFound, OperationalError) as e:
-                    raise KeyError(key) from e
-                else:
-                    session.commit()
+        with self as session:
+            try:
+                session.query(self._entry_cls).filter_by(key=key).delete()
+            except (NoResultFound, OperationalError) as e:
+                raise KeyError(key) from e
+            else:
+                session.commit()
 
 
 class TTLDBCache(DBCache):
     """
-    :param int ttl: The time to live, in seconds, for entries in this DBCache
+    :param ttl: The time to live, in seconds, for entries in this DBCache
     """
-    def __init__(self, *args, ttl, **kwargs):
-        # noinspection PyTypeChecker
+
+    def __init__(self, *args, ttl: int, **kwargs):
         super().__init__(*args, entry_cls=TTLDBCacheEntry, **kwargs)
         self._ttl = int(ttl)
 
-    def expire(self, expiration=None):
+    def expire(self, expiration: int = None):
         """
-        :param int expiration: A unix epoch timestamp - items created before this time will be removed from the cache.
+        :param expiration: A unix epoch timestamp - items created before this time will be removed from the cache.
           Defaults to the given TTL seconds earlier than the current time.
         """
         with self._lock:
@@ -218,68 +229,30 @@ class TTLDBCache(DBCache):
                 expiration = int(time.time()) - self._ttl
             with self.db_session as session:
                 try:
-                    # noinspection PyUnresolvedReferences
                     session.query(self._entry_cls).filter(self._entry_cls.created < expiration).delete()
-                except (NoResultFound, OperationalError) as e:
+                except (NoResultFound, OperationalError):
                     pass
                 else:
                     session.commit()
 
-    def keys(self):
-        with self._lock:
-            self.expire()
-            with self.db_session as session:
-                for entry in session.query(self._entry_cls):
-                    yield entry.key
-
-    def values(self):
-        with self._lock:
-            self.expire()
-            with self.db_session as session:
-                for entry in session.query(self._entry_cls):
-                    yield entry.value
-
-    def items(self):
-        with self._lock:
-            self.expire()
-            with self.db_session as session:
-                for entry in session.query(self._entry_cls):
-                    yield entry.key, entry.value
+    def __enter__(self) -> scoped_session:
+        self._lock.acquire()
+        self.expire()
+        return self.db_session.__enter__()
 
     def update(self, data: Mapping):
-        with self._lock:
-            self.expire()
-            with self.db_session as session:
-                created = int(time.time())
-                for key, value in data.items():
-                    # noinspection PyArgumentList
-                    entry = self._entry_cls(key=key, value=value, created=created)
-                    session.merge(entry)
-                session.commit()
-
-    def __len__(self):
-        with self._lock:
-            self.expire()
-            return super().__len__()
-
-    def __contains__(self, item):
-        with self._lock:
-            self.expire()
-            return super().__contains__(item)
+        with self as session:
+            created = int(time.time())
+            for key, value in data.items():
+                entry = self._entry_cls(key=key, value=value, created=created)
+                session.merge(entry)
+            session.commit()
 
     def __setitem__(self, key, value):
-        with self._lock:
-            self.expire()
-            with self.db_session as session:
-                # noinspection PyArgumentList
-                entry = self._entry_cls(key=key, value=value, created=int(time.time()))
-                session.merge(entry)
-                session.commit()
-
-    def __getitem__(self, item):
-        with self._lock:
-            self.expire()
-            return super().__getitem__(item)
+        with self as session:
+            entry = self._entry_cls(key=key, value=value, created=int(time.time()))
+            session.merge(entry)
+            session.commit()
 
 
 class _CacheKey:
