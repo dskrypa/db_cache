@@ -1,23 +1,39 @@
 #!/usr/bin/env python
 
-import logging
-import tempfile
 import time
-import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest import TestCase, main
 
-from db_cache import TTLDBCache
-
-log = logging.getLogger(__name__)
+from db_cache import TTLDBCache, DBCache
 
 
-class TTLDBCacheTest(unittest.TestCase):
+class TTLDBCacheTest(TestCase):
+    def test_memory_init(self):
+        cache = DBCache('test', db_path=':memory:')
+        self.assertIs(None, cache.cache_dir)
+        self.assertEqual('sqlite:///:memory:', str(cache.engine.url))
+
+    def test_clean_old(self):
+        with TemporaryDirectory() as tmp_dir:
+            tmp_dir = Path(tmp_dir)
+            sub_dir = tmp_dir.joinpath('test.dir.db')
+            sub_dir.mkdir()
+            old_path = tmp_dir.joinpath('test.old.db')
+            old_path.touch()
+            non_db_path = tmp_dir.joinpath('test.foo.txt')
+            non_db_path.touch()
+            TTLDBCache('test', cache_dir=tmp_dir, ttl=100)
+            self.assertFalse(old_path.exists())
+            self.assertTrue(non_db_path.exists())
+            self.assertTrue(sub_dir.exists())
+
     def test_entry_expiry(self):
-        with tempfile.TemporaryDirectory() as tmp_dir:
+        with TemporaryDirectory() as tmp_dir:
             db = TTLDBCache('test', cache_dir=tmp_dir, ttl=100)
             db['a'] = 'test a'
             db['b'] = 'test b'
             with db.db_session as session:
-                # noinspection PyArgumentList
                 entry = db._entry_cls(key='c', value='test c', created=int(time.time() - 50))
                 session.merge(entry)
                 entry = db._entry_cls(key='d', value='test d', created=int(time.time() - 200))
@@ -40,6 +56,6 @@ class TTLDBCacheTest(unittest.TestCase):
 
 if __name__ == '__main__':
     try:
-        unittest.main(warnings='ignore', verbosity=2, exit=False)
+        main(verbosity=2, exit=False)
     except KeyboardInterrupt:
         print()

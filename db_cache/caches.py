@@ -11,7 +11,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 from threading import RLock
-from typing import TYPE_CHECKING, Mapping
+from typing import TYPE_CHECKING, Optional, Mapping
 
 from sqlalchemy import create_engine, MetaData, Table, Column, PickleType, Integer
 from sqlalchemy.ext.declarative import declarative_base
@@ -24,6 +24,9 @@ if TYPE_CHECKING:
 
 __all__ = ['DBCache', 'DBCacheEntry', 'TTLDBCacheEntry', 'TTLDBCache']
 log = logging.getLogger(__name__)
+
+OptStr = Optional[str]
+_Path = Optional[PathLike]
 
 Base = declarative_base()
 _NotSet = object()
@@ -79,24 +82,9 @@ class DBCache:
         db_path: PathLike = None,
         entry_cls=DBCacheEntry,
     ):
-        if not db_path:
-            if cache_dir:
-                cache_dir = Path(cache_dir).expanduser()
-                self.cache_dir = validate_or_make_dir((cache_dir / cache_subdir) if cache_subdir else cache_dir)
-            else:
-                self.cache_dir = get_user_cache_dir(cache_subdir)
-
-            current_db = f'{prefix}.{datetime.now().strftime(time_fmt)}.db'
-            if not preserve_old:
-                self._cleanup_old_dbs(f'{prefix}.', current_db)
-
-            db_path = self.cache_dir.joinpath(current_db)
-        else:
-            path = Path(db_path).expanduser().resolve()
-            path.parent.mkdir(parents=True, exist_ok=True)
-
+        engine_url = self._prep_storage(prefix, cache_dir, cache_subdir, time_fmt, preserve_old, db_path)
         self._entry_cls = entry_cls
-        self.engine = create_engine(f'sqlite:///{db_path.as_posix()}', echo=False)
+        self.engine = create_engine(engine_url, echo=False)
         self.meta = MetaData(self.engine)
         try:
             self.table = Table(self._entry_cls.__tablename__, self.meta, autoload=True)
@@ -105,6 +93,31 @@ class DBCache:
             self.table = Table(self._entry_cls.__tablename__, self.meta, autoload=True)
         self.db_session = ScopedSession(self.engine)
         self._lock = RLock()
+
+    def _prep_storage(
+        self, prefix: str, cache_dir: _Path, cache_subdir: OptStr, time_fmt: str, preserve_old: bool, db_path: _Path
+    ) -> str:
+        if db_path:
+            if db_path != ':memory:':
+                path = Path(db_path).expanduser().resolve()
+                path.parent.mkdir(parents=True, exist_ok=True)
+                self.cache_dir = path.parent
+            else:
+                self.cache_dir = None
+            return f'sqlite:///{db_path}'
+
+        if cache_dir:
+            cache_dir = Path(cache_dir).expanduser()
+            self.cache_dir = validate_or_make_dir((cache_dir / cache_subdir) if cache_subdir else cache_dir)
+        else:
+            self.cache_dir = get_user_cache_dir(cache_subdir)
+
+        current_db = f'{prefix}.{datetime.now().strftime(time_fmt)}.db'
+        if not preserve_old:
+            self._cleanup_old_dbs(f'{prefix}.', current_db)
+
+        db_path = self.cache_dir.joinpath(current_db)
+        return f'sqlite:///{db_path.as_posix()}'
 
     def _cleanup_old_dbs(self, db_file_prefix: str, current_db: str):
         for path in self.cache_dir.iterdir():
