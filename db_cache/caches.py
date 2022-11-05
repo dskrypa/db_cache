@@ -9,9 +9,10 @@ from __future__ import annotations
 import logging
 import time
 from datetime import datetime
+from functools import cached_property
 from pathlib import Path
 from threading import RLock
-from typing import TYPE_CHECKING, Optional, Mapping
+from typing import TYPE_CHECKING, Union, Optional, Mapping, Iterator, TypeVar, Generic
 
 from sqlalchemy import create_engine, MetaData, Table, Column, PickleType, Integer
 from sqlalchemy.ext.declarative import declarative_base
@@ -27,6 +28,9 @@ log = logging.getLogger(__name__)
 
 OptStr = Optional[str]
 _Path = Optional[PathLike]
+KT = TypeVar('KT')
+VT = TypeVar('VT')
+DT = TypeVar('DT')
 
 Base = declarative_base()
 _NotSet = object()
@@ -55,7 +59,7 @@ class TTLDBCacheEntry(Base):
         return f'<{self.__class__.__name__}({self.key!r}, created={self.created})>'
 
 
-class DBCache:
+class DBCache(Generic[KT, VT]):
     """
     A dictionary-like cache that stores values in an SQLite3 DB.  Old cache files in the cache directory that begin with
     the same ``file_prefix`` and username that have non-matching dates in their filename will be deleted when a cache
@@ -85,29 +89,19 @@ class DBCache:
         engine_url = self._prep_storage(prefix, cache_dir, cache_subdir, time_fmt, preserve_old, db_path)
         self._entry_cls = entry_cls
         self.engine = create_engine(engine_url, echo=False)
-        self.meta = MetaData(self.engine)
-        try:
-            self.table = Table(self._entry_cls.__tablename__, self.meta, autoload=True)
-        except NoSuchTableError:
-            Base.metadata.create_all(self.engine)
-            self.table = Table(self._entry_cls.__tablename__, self.meta, autoload=True)
-        self.db_session = ScopedSession(self.engine)
         self._lock = RLock()
 
     def _prep_storage(
         self, prefix: str, cache_dir: _Path, cache_subdir: OptStr, time_fmt: str, preserve_old: bool, db_path: _Path
     ) -> str:
-        if db_path:
+        if db_path:  # An explicit db path means that the cache dir's contents are not managed by this class
+            self.cache_dir = None
             if db_path != ':memory:':
-                path = Path(db_path).expanduser().resolve()
-                path.parent.mkdir(parents=True, exist_ok=True)
-                self.cache_dir = path.parent
-            else:
-                self.cache_dir = None
+                validate_or_make_dir(Path(db_path).expanduser().resolve().parent)
             return f'sqlite:///{db_path}'
 
         if cache_dir:
-            cache_dir = Path(cache_dir).expanduser()
+            cache_dir = Path(cache_dir)
             self.cache_dir = validate_or_make_dir((cache_dir / cache_subdir) if cache_subdir else cache_dir)
         else:
             self.cache_dir = get_user_cache_dir(cache_subdir)
@@ -120,14 +114,31 @@ class DBCache:
         return f'sqlite:///{db_path.as_posix()}'
 
     def _cleanup_old_dbs(self, db_file_prefix: str, current_db: str):
-        for path in self.cache_dir.iterdir():
-            if path.name.startswith(db_file_prefix) and path.suffix == '.db' and path.name != current_db:
-                try:
-                    if path.is_file():
-                        log.debug(f'Deleting old cache file: {path.as_posix()}')
-                        path.unlink()
-                except OSError as e:
-                    log.debug(f'{e.__class__.__name__} while deleting old cache file {path.as_posix()}: {e}')
+        for path in self.cache_dir.glob(f'{db_file_prefix}*.db'):
+            try:
+                if path.name != current_db and path.is_file():
+                    log.debug(f'Deleting old cache file: {path.as_posix()}')
+                    path.unlink()
+            except OSError as e:
+                log.debug(f'{e.__class__.__name__} while deleting old cache file {path.as_posix()}: {e}')
+
+    @cached_property
+    def meta(self) -> MetaData:
+        return MetaData(self.engine)
+
+    @cached_property
+    def table(self) -> Table:
+        try:
+            return Table(self._entry_cls.__tablename__, self.meta, autoload=True)
+        except NoSuchTableError:
+            Base.metadata.create_all(self.engine)
+            return Table(self._entry_cls.__tablename__, self.meta, autoload=True)
+
+    @cached_property
+    def db_session(self) -> ScopedSession:
+        if 'table' not in self.__dict__:
+            _ = self.table  # Populate the cached property
+        return ScopedSession(self.engine)
 
     @classmethod
     def _get_default_key_func(cls):
@@ -143,35 +154,35 @@ class DBCache:
         finally:
             self._lock.release()
 
-    def keys(self):
+    def keys(self) -> Iterator[KT]:
         with self as session:
             for entry in session.query(self._entry_cls):
                 yield entry.key
 
-    def values(self):
+    def values(self) -> Iterator[VT]:
         with self as session:
             for entry in session.query(self._entry_cls):
                 yield entry.value
 
-    def items(self):
+    def items(self) -> Iterator[tuple[KT, VT]]:
         with self as session:
             for entry in session.query(self._entry_cls):
                 yield entry.key, entry.value
 
-    def get(self, item, default=None):
+    def get(self, item: KT, default: DT = None) -> Union[VT, DT]:
         try:
             return self[item]
         except KeyError:
             return default
 
-    def setdefault(self, key, default):
+    def setdefault(self, key: KT, default: DT) -> Union[VT, DT]:
         try:
             return self[key]
         except KeyError:
             self[key] = default
             return default
 
-    def pop(self, key, default=_NotSet):
+    def pop(self, key: KT, default: DT = _NotSet) -> Union[VT, DT]:
         with self._lock:
             try:
                 value = self[key]
@@ -183,22 +194,25 @@ class DBCache:
                 del self[key]
                 return value
 
-    def update(self, data: Mapping):
+    def update(self, data: Mapping[KT, VT]):
         with self as session:
             for key, value in data.items():
                 entry = self._entry_cls(key=key, value=value)
                 session.merge(entry)
             session.commit()
 
-    def __len__(self):
+    def __iter__(self) -> Iterator[KT]:
+        yield from self.keys()
+
+    def __len__(self) -> int:
         with self as session:
             return session.query(self._entry_cls).count()
 
-    def __contains__(self, item):
+    def __contains__(self, item) -> bool:
         with self as session:
             return session.query(self._entry_cls).filter_by(key=item).scalar()
 
-    def __getitem__(self, item):
+    def __getitem__(self, item: KT) -> VT:
         with self as session:
             try:
                 # log.debug('Trying to return {!r}'.format(item))
@@ -207,23 +221,25 @@ class DBCache:
                 # log.debug('Did not have cached: {!r}'.format(item))
                 raise KeyError(item) from e
 
-    def __setitem__(self, key, value):
+    def __setitem__(self, key: KT, value: VT):
         with self as session:
             entry = self._entry_cls(key=key, value=value)
             session.merge(entry)
             session.commit()
 
-    def __delitem__(self, key):
+    def __delitem__(self, key: KT):
         with self as session:
             try:
-                session.query(self._entry_cls).filter_by(key=key).delete()
+                obj = session.query(self._entry_cls).filter_by(key=key).one()
+                # Note: using .delete() instead returns the count of rows deleted, and it never raises NoResultFound
+                session.delete(obj)
             except (NoResultFound, OperationalError) as e:
                 raise KeyError(key) from e
             else:
                 session.commit()
 
 
-class TTLDBCache(DBCache):
+class TTLDBCache(DBCache[KT, VT]):
     """
     :param ttl: The time to live, in seconds, for entries in this DBCache
     """
@@ -253,7 +269,7 @@ class TTLDBCache(DBCache):
         self.expire()
         return self.db_session.__enter__()
 
-    def update(self, data: Mapping):
+    def update(self, data: Mapping[KT, VT]):
         with self as session:
             created = int(time.time())
             for key, value in data.items():
@@ -261,7 +277,7 @@ class TTLDBCache(DBCache):
                 session.merge(entry)
             session.commit()
 
-    def __setitem__(self, key, value):
+    def __setitem__(self, key: KT, value: VT):
         with self as session:
             entry = self._entry_cls(key=key, value=value, created=int(time.time()))
             session.merge(entry)
