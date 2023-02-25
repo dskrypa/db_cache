@@ -124,15 +124,15 @@ class DBCache(Generic[KT, VT]):
 
     @cached_property
     def meta(self) -> MetaData:
-        return MetaData(self.engine)
+        return MetaData()
 
     @cached_property
     def table(self) -> Table:
         try:
-            return Table(self._entry_cls.__tablename__, self.meta, autoload=True)
+            return Table(self._entry_cls.__tablename__, self.meta, autoload_with=self.engine)
         except NoSuchTableError:
             Base.metadata.create_all(self.engine)
-            return Table(self._entry_cls.__tablename__, self.meta, autoload=True)
+            return Table(self._entry_cls.__tablename__, self.meta, autoload_with=self.engine)
 
     @cached_property
     def db_session(self) -> ScopedSession:
