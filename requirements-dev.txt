@@ -1,0 +1,11 @@
+-e .[]
+
+pre-commit
+ruff
+
+# QoL
+ipython>=9.6.0
+rich
+
+# Testing
+coverage

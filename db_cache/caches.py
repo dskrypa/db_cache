@@ -12,13 +12,13 @@ from datetime import datetime
 from functools import cached_property
 from pathlib import Path
 from threading import RLock
-from typing import TYPE_CHECKING, Union, Optional, Mapping, Iterator, TypeVar, Generic
+from typing import TYPE_CHECKING, Generic, Iterator, Mapping, TypeVar
 
-from sqlalchemy import create_engine, MetaData, Table, Column, PickleType, Integer
+from sqlalchemy import Column, Integer, MetaData, PickleType, Table, create_engine
+from sqlalchemy.exc import NoResultFound, NoSuchTableError, OperationalError
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.exc import NoSuchTableError, OperationalError, NoResultFound
 
-from .utils import ScopedSession, validate_or_make_dir, get_user_cache_dir, PathLike
+from .utils import PathLike, ScopedSession, get_user_cache_dir, validate_or_make_dir
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import scoped_session
@@ -26,8 +26,7 @@ if TYPE_CHECKING:
 __all__ = ['DBCache', 'DBCacheEntry', 'TTLDBCacheEntry', 'TTLDBCache']
 log = logging.getLogger(__name__)
 
-OptStr = Optional[str]
-_Path = Optional[PathLike]
+_Path = PathLike | None
 KT = TypeVar('KT')
 VT = TypeVar('VT')
 DT = TypeVar('DT')
@@ -38,6 +37,7 @@ _NotSet = object()
 
 class DBCacheEntry(Base):
     """A key, value pair for use in :class:`DBCache`"""
+
     __tablename__ = 'cache'
 
     key = Column(PickleType, primary_key=True, index=True, unique=True)
@@ -49,6 +49,7 @@ class DBCacheEntry(Base):
 
 class TTLDBCacheEntry(Base):
     """A key, value pair for use in :class:`TTLDBCache`"""
+
     __tablename__ = 'ttl_cache'
 
     key = Column(PickleType, primary_key=True, index=True, unique=True)
@@ -76,6 +77,7 @@ class DBCache(Generic[KT, VT]):
     :param db_path: An explicit path to use for the DB instead of a dynamically generated one
     :param entry_cls: The class to use for DB entries
     """
+
     def __init__(
         self,
         prefix: str,
@@ -92,7 +94,7 @@ class DBCache(Generic[KT, VT]):
         self._lock = RLock()
 
     def _prep_storage(
-        self, prefix: str, cache_dir: _Path, cache_subdir: OptStr, time_fmt: str, preserve_old: bool, db_path: _Path
+        self, prefix: str, cache_dir: _Path, cache_subdir: str | None, time_fmt: str, preserve_old: bool, db_path: _Path
     ) -> str:
         if db_path:  # An explicit db path means that the cache dir's contents are not managed by this class
             self.cache_dir = None
@@ -169,20 +171,20 @@ class DBCache(Generic[KT, VT]):
             for entry in session.query(self._entry_cls):
                 yield entry.key, entry.value
 
-    def get(self, item: KT, default: DT = None) -> Union[VT, DT]:
+    def get(self, item: KT, default: DT = None) -> VT | DT:
         try:
             return self[item]
         except KeyError:
             return default
 
-    def setdefault(self, key: KT, default: DT) -> Union[VT, DT]:
+    def setdefault(self, key: KT, default: DT) -> VT | DT:
         try:
             return self[key]
         except KeyError:
             self[key] = default
             return default
 
-    def pop(self, key: KT, default: DT = _NotSet) -> Union[VT, DT]:
+    def pop(self, key: KT, default: DT = _NotSet) -> VT | DT:
         with self._lock:
             try:
                 value = self[key]

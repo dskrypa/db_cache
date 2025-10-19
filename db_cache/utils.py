@@ -4,21 +4,22 @@ ScopedSession for using SqlAlchemy in a multi-threaded application
 :author: Doug Skrypa
 """
 
+from __future__ import annotations
+
 import logging
 from getpass import getuser
 from pathlib import Path
 from platform import system
 from stat import S_ISDIR
-from typing import Union
 
-from sqlalchemy.orm import sessionmaker, scoped_session
+from sqlalchemy.orm import scoped_session, sessionmaker
 
 __all__ = ['ScopedSession', 'validate_or_make_dir', 'get_user_cache_dir']
 log = logging.getLogger(__name__)
 
 ON_WINDOWS = system().lower() == 'windows'
 
-PathLike = Union[Path, str]
+PathLike = Path | str
 
 
 class ScopedSession:
@@ -28,6 +29,7 @@ class ScopedSession:
     :param engine: An `SqlAlchemy Engine
       <http://docs.sqlalchemy.org/en/latest/core/connections.html#sqlalchemy.engine.Engine>`_
     """
+
     __slots__ = ('_scoped_session',)
 
     def __init__(self, engine):
